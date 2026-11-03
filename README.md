@@ -126,8 +126,7 @@ Or a udev rule with `TAG+="uaccess"`.
 
 ## License
 
-To be decided by the author before publishing (MIT is the usual fit for a
-shim of this size).
+MIT. See [LICENSE](LICENSE).
 
 WinTab is a specification by LCS/Telegraphics; `ref/` contains upstream files
 kept only as reference and carry their own licenses.
