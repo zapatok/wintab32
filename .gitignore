@@ -2,3 +2,5 @@ dist/
 run/
 tools/*.exe
 *.o
+
+*.dll
