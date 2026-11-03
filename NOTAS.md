@@ -14,7 +14,7 @@ y el cursor se mueven juntos, sólo llegan un poco tarde.
 Evidencia: tabla real con 962 paquetes y 64 presiones distintas (0–1023),
 `WTGetW pktData=0x1fe4` —exactamente la máscara de Qt—, `WTQueueSizeGet = 128`,
 un único `WTOpenW` por corrida, y el trazo con presión confirmado por el usuario
-en pantalla. Detalle: `docs/harmony25-lapiz-presion.md`.
+en pantalla. Detalle: el resto de este documento.
 
 > **Hallazgo que cambió el diseño:** Qt 6.4.2 **no usa WinTab** salvo que se
 > desactive WM_POINTER, y Wine **borra** las variables `QT_*` del entorno. Las
@@ -443,7 +443,7 @@ La forma estable es una regla udev con `uaccess`, que systemd-logind traduce a u
 ACL del usuario de la sesión (y lo re-aplica solo):
 
 ```bash
-cd /var/home/daniel/dsh-sandbox/workspace/tb/wintab
+cd wintab32
 sudo ./instalar.sh --udev          # /etc/udev/rules.d/70-wacom-wintab.rules
 getfacl -p /dev/input/event20 | grep "$USER"
 ```
@@ -463,7 +463,7 @@ entra en el proceso actual). Para revertir la regla: `sudo ./desinstalar.sh --ud
 ## 10. Verificación en el host (el paso que falta)
 
 ```bash
-cd /var/home/daniel/dsh-sandbox/workspace/tb/wintab
+cd wintab32
 ./instalar.sh                     # DLL + override + qt.conf
 ./probar_shim.sh 10               # shim contra el lápiz, sin Harmony
 ```
