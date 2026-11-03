@@ -124,6 +124,24 @@ sudo usermod -aG input "$USER"      # then log out and back in
 
 Or a udev rule with `TAG+="uaccess"`.
 
+## Related work
+
+- **[Pain Studio Mask](https://github.com/stopperw/pain-studio-mask)** — the
+  closest existing project: a Rust `wintab32.dll` emulator for Wine. Same idea,
+  different plumbing: it takes events from an **OpenTabletDriver daemon** over a
+  local socket (port 40302) plus a `psm.json`. Its FAQ still lists a libinput
+  client as future work. This shim exists because that daemon is exactly the
+  extra moving part we wanted to remove: it reads `/dev/input` directly.
+- **[Wine bug 53052](https://bugs.winehq.org/show_bug.cgi?id=53052)** — tablet
+  pressure does not work under Wayland. Open; the builtin `wintab32` enumerates
+  devices through XInput 1, which XWayland answers with virtual pointers only.
+- **[Wine bug 53642](https://bugs.winehq.org/show_bug.cgi?id=53642)** —
+  `wintab.c:is_tablet_cursor` fails with XWayland devices.
+- **`winewayland.drv`** — Wine's native Wayland driver. Where a build ships it,
+  tablets can reach Qt through WM_POINTER and no shim is needed. Distro packages
+  often omit it; check `ls /usr/lib*/wine/x86_64-unix/ | grep wayland` before
+  assuming you need any of this.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
