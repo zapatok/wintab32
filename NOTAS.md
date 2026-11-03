@@ -257,10 +257,10 @@ El nodo es `root:input 0660`; sin acceso el shim no lee nada (lo dice en el log:
 
 ```bash
 # A) grupo (recomendado, sobrevive reinicios)
-sudo usermod -aG input daniel       # y volver a iniciar sesión
+sudo usermod -aG input "$USER"       # y volver a iniciar sesión
 #    (mientras no cierres sesión, el grupo viejo sigue activo: usa la opción C)
 # C) prueba inmediata sin relogin (se pierde al reiniciar)
-sudo setfacl -m "u:daniel:r" /dev/input/event20
+sudo setfacl -m "u:$USER:r" /dev/input/eventNN
 
 # B) regla udev con ACL para el usuario de la sesión
 sudo tee /etc/udev/rules.d/99-wacom-uaccess.rules >/dev/null <<'EOF'
@@ -457,7 +457,7 @@ El número importa: el builtin `uaccess` de systemd-logind se encola en
 De ahí `70-wacom-wintab.rules`; `MODE="0664"` queda como red de seguridad por si
 el seat no está disponible (el nodo de un lápiz no es un teclado).
 
-Alternativa: `sudo usermod -aG input daniel` + cerrar y abrir sesión (el grupo no
+Alternativa: `sudo usermod -aG input "$USER"` + cerrar y abrir sesión (el grupo no
 entra en el proceso actual). Para revertir la regla: `sudo ./desinstalar.sh --udev`.
 
 ## 10. Verificación en el host (el paso que falta)
