@@ -70,7 +70,14 @@ Requires `mingw-w64` (x86_64) and `make`-free simplicity:
 ## Install
 
 ```bash
-./instalar.sh         # DLL + override + qt.conf with nowmpointer
+./instalar.sh --todo  # DLL + override + qt.conf + the udev rule (asks sudo once)
+```
+
+Without `--todo` the udev rule is left out, and the pen may be unreadable
+(`/dev/input` is root-only by default). Then, at any moment:
+
+```bash
+./verificar.sh        # read-only: says which of the five pieces is missing
 ```
 
 Manual equivalent:
@@ -88,6 +95,7 @@ Uninstall with `./desinstalar.sh`, which removes the DLL and the override.
 ## Diagnose
 
 ```bash
+./verificar.sh                   # five checks, exact fix per failure
 ./probar_shim.sh                 # runs the probe app under the prefix
 WT_LOG_LEVEL=3 wine yourapp.exe  # verbose log to C:\wt.log
 ```
@@ -104,12 +112,32 @@ Reading the log:
 | `WTPacketsGet n=…` | the app is pulling packets |
 | nothing at all | nobody loaded the DLL — the shim is not the problem |
 
+## Latency
+
+There is an optional meter, off by default, that records every packet and dumps a
+CSV when the process unloads the DLL:
+
+```bash
+WT_METRICS=/tmp/wt.csv ./probar_shim.sh 10
+python3 tools/wtmetrics.py /tmp/wt.csv --per-second
+./tools/medir_latencia.sh              # opens the app, draw, close, get numbers
+```
+
+Measured on a FIFO bench (Wine 8, Xvfb): 8 µs per packet of shim cost, but 207 µs
+with `WT_POS_CURSOR` on — `GetCursorPos()` is an X round-trip per packet.
+`WT_POS_CACHE=1` queries the pointer once per read burst instead: same
+coordinates, back to 8 µs. Message coalescing (`WT_COALESCE=1`) cuts messages 7x
+but adds a wait tail, and the queue never went above 43 of 128 with zero drops,
+so it stays off. Numbers, commands and caveats: [docs/LATENCIA.md](docs/LATENCIA.md).
+
 ## Layout
 
 ```
-src/       wintab32.c, evdev.c, wtapi.h, evdev.h, wtlog.c
+src/       wintab32.c, evdev.c, wtapi.h, evdev.h, wtlog.c, wtmetrics.c
 ref/       Wine's own wintab32 + Qt's tablet support, for reference
-tools/     wtprobe.c (probe), mkfake.py (synthetic device)
+tools/     wtprobe.c (probe), mkfake.py (synthetic device),
+           wtmetrics.py (CSV -> percentiles), medir_latencia.sh
+docs/      LATENCIA.md (what the shim costs, measured)
 dist/      built DLL
 build.sh   mingw-w64 build
 ```
@@ -123,24 +151,6 @@ sudo usermod -aG input "$USER"      # then log out and back in
 ```
 
 Or a udev rule with `TAG+="uaccess"`.
-
-## Related work
-
-- **[Pain Studio Mask](https://github.com/stopperw/pain-studio-mask)** — the
-  closest existing project: a Rust `wintab32.dll` emulator for Wine. Same idea,
-  different plumbing: it takes events from an **OpenTabletDriver daemon** over a
-  local socket (port 40302) plus a `psm.json`. Its FAQ still lists a libinput
-  client as future work. This shim exists because that daemon is exactly the
-  extra moving part we wanted to remove: it reads `/dev/input` directly.
-- **[Wine bug 53052](https://bugs.winehq.org/show_bug.cgi?id=53052)** — tablet
-  pressure does not work under Wayland. Open; the builtin `wintab32` enumerates
-  devices through XInput 1, which XWayland answers with virtual pointers only.
-- **[Wine bug 53642](https://bugs.winehq.org/show_bug.cgi?id=53642)** —
-  `wintab.c:is_tablet_cursor` fails with XWayland devices.
-- **`winewayland.drv`** — Wine's native Wayland driver. Where a build ships it,
-  tablets can reach Qt through WM_POINTER and no shim is needed. Distro packages
-  often omit it; check `ls /usr/lib*/wine/x86_64-unix/ | grep wayland` before
-  assuming you need any of this.
 
 ## License
 

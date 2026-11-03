@@ -9,6 +9,8 @@
 #ifndef EVDEV_H
 #define EVDEV_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,6 +20,8 @@ typedef struct {
     int      pressure;     /* already scaled to the WinTab range */
     unsigned buttons;      /* bit0 tip, bit1 stylus, bit2 stylus2 */
     unsigned cursor;       /* 1 = pen, 2 = eraser */
+    int64_t  t_ev_us;      /* kernel SYN timestamp, metric clock (0 = unknown) */
+    int64_t  t_read_us;    /* when the reader decoded it (0 = metrics off) */
 } EV_PKT;
 
 typedef void (*EV_ON_PACKET)(const EV_PKT *pkt);

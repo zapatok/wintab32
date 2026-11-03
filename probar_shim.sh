@@ -28,7 +28,7 @@ if [ -f "$LOG" ]; then
     echo "== $LOG (arranque y llamadas)"
     sed -n '1,14p' "$LOG"
     echo "== diagnóstico de /dev/input"
-    grep -E "evdev: (candidate|using|scanned|no /dev/input|forced)" "$LOG" | head -8
+    grep -E "evdev: (candidate|using|event nodes|no /dev/input|forced)" "$LOG" | head -8
     echo "== cola de llamadas WinTab"
     grep -E "WTOpenW name|WTOpenW\(|WTQueueSize|WTEnable" "$LOG" | head -6
     echo "== paquetes registrados: $(grep -c 'evdev packet' "$LOG" || echo 0)"

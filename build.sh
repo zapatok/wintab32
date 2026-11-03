@@ -7,7 +7,7 @@ CC=${CC:-x86_64-w64-mingw32-gcc}
 CFLAGS=${CFLAGS:--O2 -g -Wall -Wextra -Wno-cast-function-type -municode}
 mkdir -p dist
 
-SRC="src/wintab32.c src/evdev.c src/wtlog.c"
+SRC="src/wintab32.c src/evdev.c src/wtlog.c src/wtmetrics.c"
 
 $CC $CFLAGS -shared -o dist/wintab32.dll $SRC wintab32.def \
     -Wl,--enable-stdcall-fixup -Wl,--subsystem,windows \

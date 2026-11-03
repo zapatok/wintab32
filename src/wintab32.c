@@ -23,6 +23,7 @@
 #include "wtapi.h"
 #include "evdev.h"
 #include "wtlog.h"
+#include "wtmetrics.h"
 
 #define SHIM_NAME    L"ToonBoom Linux WinTab 1.0"
 #define SHIM_VERSION 0x0100          /* 1.0 */
@@ -54,12 +55,24 @@ typedef struct {
     int    qsize;
     int    head;
     int    count;
+    unsigned long last_post;   /* GetTickCount of the last WT_PACKET (coalescing) */
 } CTX;
 
 static CRITICAL_SECTION g_lock;
 static INIT_ONCE        g_once = INIT_ONCE_STATIC_INIT;
 static CTX             *g_ctx[MAX_CONTEXTS];
 static unsigned         g_serial;
+
+static int env_flag(const char *name, int def)
+{
+    const char *v = getenv(name);
+    if (!v || !*v)
+        return def;
+    return atoi(v);
+}
+
+static int              g_coalesce = -1;   /* WT_COALESCE: 0 off (default) */
+static int              g_coalesce_ms = 4; /* WT_COALESCE_MS */
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -134,17 +147,21 @@ static CTX *ctx_from_handle(HCTX h)
     return NULL;
 }
 
-/* caller holds g_lock */
-static void push_locked(CTX *ctx, const RAWPKT *r)
+/* caller holds g_lock; returns 1 when the oldest packet had to be dropped */
+static int push_locked(CTX *ctx, const RAWPKT *r)
 {
+    int dropped = 0;
+
     if (!ctx->used || !ctx->enabled || ctx->qsize <= 0)
-        return;
+        return 0;
     if (ctx->count == ctx->qsize) {        /* drop the oldest */
         ctx->head = (ctx->head + 1) % ctx->qsize;
         ctx->count--;
+        dropped = 1;
     }
     ctx->queue[(ctx->head + ctx->count) % ctx->qsize] = *r;
     ctx->count++;
+    return dropped;
 }
 
 /* ------------------------------------------------------------------ */
@@ -169,11 +186,39 @@ static void on_packet(const EV_PKT *p)
     r.time = GetTickCount();
     for (i = 0; i < MAX_CONTEXTS; i++) {
         CTX *ctx = g_ctx[i];
+        int dropped, posted = 0;
+        int64_t t_post = 0;
+
         if (!ctx || !ctx->used || !ctx->enabled)
             continue;
-        push_locked(ctx, &r);
-        if (ctx->lc.lcOptions & CXO_MESSAGES)
-            PostMessageW(ctx->hwnd, WT_PACKET, (WPARAM)r.serial, (LPARAM)ctx);
+
+        dropped = push_locked(ctx, &r);
+
+        if (ctx->lc.lcOptions & CXO_MESSAGES) {
+            /*
+             * Coalescing: the queue keeps every sample, but the window is not
+             * flooded with one message per sample.  Qt drains the whole queue
+             * with WTPacketsGet(128) on each WT_PACKET, so several packets ride
+             * on one message.  The first packet after an empty queue is posted
+             * immediately, and so is the lift, so latency at the edges does not
+             * change.  Off by default: measure first, then decide.
+             */
+            unsigned long now = GetTickCount();
+            int skip = g_coalesce > 0 && ctx->count > 1 && r.buttons != 0 &&
+                       (now - ctx->last_post) < (unsigned long)g_coalesce_ms;
+            if (skip) {
+                wtm_count_coalesced();
+            } else {
+                t_post = wtm_on() ? wtm_now_us() : 0;
+                PostMessageW(ctx->hwnd, WT_PACKET, (WPARAM)r.serial, (LPARAM)ctx);
+                ctx->last_post = now;
+                posted = 1;
+            }
+        }
+
+        if (wtm_on())
+            wtm_record(p->t_ev_us, p->t_read_us, t_post, ctx->count,
+                       posted, dropped);
     }
     LeaveCriticalSection(&g_lock);
 
@@ -201,7 +246,7 @@ static void on_proximity(int enter, const EV_PKT *p)
         CTX *ctx = g_ctx[i];
         if (!ctx || !ctx->used)
             continue;
-        push_locked(ctx, &r);
+        (void)push_locked(ctx, &r);
         if (ctx->lc.lcOptions & CXO_MESSAGES)
             PostMessageW(ctx->hwnd, WT_PROXIMITY, (WPARAM)r.serial,
                          (LPARAM)MAKELPARAM(enter ? 1 : 0, enter ? 1 : 0));
@@ -221,6 +266,13 @@ static BOOL CALLBACK shim_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
     (void)once; (void)param; (void)ctx;
     InitializeCriticalSection(&g_lock);
     wtlog_open();
+    wtm_init();
+    g_coalesce    = env_flag("WT_COALESCE", 0) ? 1 : 0;
+    g_coalesce_ms = env_flag("WT_COALESCE_MS", 4);
+    if (g_coalesce_ms < 0)
+        g_coalesce_ms = 0;
+    if (g_coalesce)
+        wtlog(WTLOG_INIT, "shim: packet coalescing on (%d ms window)", g_coalesce_ms);
     wtlog(WTLOG_INIT, "shim init: %ls", SHIM_NAME);
     evdev_set_callbacks(on_packet, on_proximity);
     evdev_start();
@@ -1108,6 +1160,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     } else if (reason == DLL_PROCESS_DETACH) {
         evdev_mouse_filter(0);
         evdev_stop();
+        wtm_close();
         wtlog_close();
     }
     return TRUE;

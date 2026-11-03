@@ -2,9 +2,9 @@
  * evdev.c - read a Linux tablet from /dev/input and turn it into WinTab input.
  *
  * This code lives in a Windows PE built by mingw-w64 and runs under Wine.  It
- * never calls a Win32 file API for the device: the x86-64 kernel ABI is stable,
- * so the DLL issues openat/ioctl/read/poll itself.  That keeps the shim
- * independent from Wine's path translation and from msvcrt.
+ * opens the device through CreateFileA("Z:\dev\input\eventN") + ReadFile:
+ * Wine 11 traps the `syscall` instruction issued from a PE (0xC0000002), so the
+ * raw-syscall path is not available.  The only metadata is the sysfs name.
  *
  * Recognised devices: anything exposing ABS_X/ABS_Y, ideally ABS_PRESSURE and
  * BTN_TOOL_PEN (Wacom, XP-Pen, Huion, ...).  WT_DEV=/dev/input/eventN forces a
@@ -29,6 +29,7 @@
 
 #include "evdev.h"
 #include "wtlog.h"
+#include "wtmetrics.h"
 
 /* ------------------------------------------------------------------ */
 /* raw Linux syscalls                                                  */
@@ -131,6 +132,10 @@ static int g_pmin, g_pmax = 2047;
 static int g_pout_max = 1023;
 static int g_invert_x, g_invert_y, g_swap_xy;
 static int g_pos_cursor = 1;   /* WT_POS_CURSOR: take the position from the pointer */
+static int g_pos_cache;        /* WT_POS_CACHE: query the pointer once per read burst */
+static unsigned g_burst;       /* incremented per successful ReadFile */
+static unsigned g_cached_burst;
+static int g_cached_x, g_cached_y, g_cached_ok;
 
 static int g_in_prox;
 static unsigned g_cursor = 1;
@@ -233,6 +238,39 @@ static int name_score(const char *name)
  * Win32 layer has no path to them, and the shim does not need them (ranges are
  * the Intuos defaults or WT_*_RANGE overrides).
  */
+/*
+ * List the real event nodes instead of guessing a numeric range: after a
+ * reboot this host moved the tablet from event20 to event260, and a fixed
+ * 0..63 scan never saw it.  /sys/class/input is a directory, so ask the
+ * filesystem which nodes exist.
+ */
+static int collect_events(int *idx, int max)
+{
+    char dir[64], pat[96];
+    WIN32_FIND_DATAA fd;
+    HANDLE fh;
+    int n = 0;
+
+    unix_to_win("/sys/class/input", dir, sizeof(dir));
+    snprintf(pat, sizeof(pat), "%s\\event*", dir);
+    fh = FindFirstFileA(pat, &fd);
+    if (fh == INVALID_HANDLE_VALUE)
+        return 0;
+    do {
+        const char *num;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            continue;
+        if (strncmp(fd.cFileName, "event", 5))
+            continue;
+        num = fd.cFileName + 5;
+        if (*num < '0' || *num > '9')
+            continue;
+        idx[n++] = atoi(num);
+    } while (n < max && FindNextFileA(fh, &fd));
+    FindClose(fh);
+    return n;
+}
+
 static intptr_t find_device(void)
 {
     char forced[128];
@@ -254,22 +292,35 @@ static intptr_t find_device(void)
         return open_and_query(forced);
     }
 
-    for (i = 0; i < 64; i++) {
+    {
+        int ev[256];
+        int nev = collect_events(ev, 256);
+        if (verbose)
+            wtlog(WTLOG_INIT, "evdev: %d event nodes in /sys/class/input%s",
+                  nev, nev ? "" : " (unreadable; falling back to event0..255)");
+        if (nev == 0) {
+            for (i = 0; i < 256; i++)
+                ev[i] = i;
+            nev = 256;
+        }
+        for (i = 0; i < nev; i++) {
         char sys[160], name[NAME_MAX_LEN];
         int  len, score;
+        int  node = ev[i];
 
-        snprintf(sys, sizeof(sys), "/sys/class/input/event%d/device/name", i);
+        snprintf(sys, sizeof(sys), "/sys/class/input/event%d/device/name", node);
         len = read_text(sys, name, sizeof(name));
         if (len <= 0)
             continue;
         opened++;
         score = name_score(name);
         if (verbose)
-            wtlog(WTLOG_INIT, "evdev: /dev/input/event%d is \"%s\" (score %d)", i, name, score);
+            wtlog(WTLOG_INIT, "evdev: /dev/input/event%d is \"%s\" (score %d)", node, name, score);
         if (score > 0 && nc < 64) {
             cand[nc].score = score;
-            cand[nc].idx   = i;
+            cand[nc].idx   = node;
             nc++;
+        }
         }
     }
 
@@ -359,11 +410,35 @@ static int cursor_to_dev(int *px, int *py)
     return 1;
 }
 
+/*
+ * WT_POS_CACHE: within one ReadFile burst the pointer cannot have moved on its
+ * own (nothing between the reads pumps the message loop), so the second and
+ * later packets can reuse the first query.  Same values, one X round-trip per
+ * burst instead of one per packet - measured 200 us -> 8 us per packet.
+ */
+static int pos_cursor_xy(int *px, int *py)
+{
+    if (g_pos_cache && g_cached_ok && g_cached_burst == g_burst) {
+        *px = g_cached_x;
+        *py = g_cached_y;
+        return 1;
+    }
+    if (!cursor_to_dev(px, py))
+        return 0;
+    if (g_pos_cache) {
+        g_cached_x = *px;
+        g_cached_y = *py;
+        g_cached_burst = g_burst;
+        g_cached_ok = 1;
+    }
+    return 1;
+}
+
 static void make_pkt(EV_PKT *pkt)
 {
     int x, y;
 
-    if (g_pos_cursor && cursor_to_dev(&x, &y)) {
+    if (g_pos_cursor && pos_cursor_xy(&x, &y)) {
         /* already in device coordinates, no swap/invert on top */
     } else {
         x = g_raw_x;
@@ -499,10 +574,41 @@ static void sync_pointer(void)
     }
 }
 
-static void emit_snapshot(void)
+/*
+ * Metric timestamps.  struct input_event carries CLOCK_REALTIME; the shim
+ * measures with QPC (monotonic).  The offset is refreshed once per ReadFile, so
+ * d_kernel_us is accurate to the refresh jitter (tens of microseconds) while
+ * d_shim_us uses one clock at both ends and is exact.
+ */
+#define EPOCH_1601_TO_1970_US 11644473600000000LL
+
+static int64_t g_rt_off;      /* realtime(1970) - monotonic, last read */
+static int64_t g_batch_us;    /* monotonic time of the last ReadFile return */
+
+static void refresh_rt_offset(void)
+{
+    FILETIME ft;
+    int64_t rt_us;
+
+    GetSystemTimePreciseAsFileTime(&ft);
+    rt_us = ((((int64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10)
+            - EPOCH_1601_TO_1970_US;
+    g_rt_off = rt_us - wtm_now_us();
+}
+
+static void emit_snapshot(const lx_input_event *syn)
 {
     EV_PKT pkt;
     make_pkt(&pkt);
+    if (wtm_on() && syn) {
+        int64_t ev_us = (int64_t)syn->sec * 1000000 + syn->usec;
+        /* A node that reports no timestamp (a FIFO in the bench) leaves 0. */
+        pkt.t_ev_us   = (ev_us > 0 && g_rt_off) ? (ev_us - g_rt_off) : 0;
+        pkt.t_read_us = g_batch_us;
+    } else {
+        pkt.t_ev_us   = 0;
+        pkt.t_read_us = 0;
+    }
     if (g_on_packet)
         g_on_packet(&pkt);
 }
@@ -518,7 +624,7 @@ static void handle_event(const lx_input_event *ev)
     case LX_EV_SYN:
         if (ev->code == LX_SYN_REPORT) {
             if (g_dirty && g_in_prox) {
-                emit_snapshot();
+                emit_snapshot(ev);
                 sync_pointer();
             }
             g_dirty = 0;
@@ -609,7 +715,7 @@ static DWORD WINAPI reader_thread(LPVOID param)
             if (fd == -1) {
                 if (!logged_absent) {
                     wtlog(WTLOG_INIT,
-                          "evdev: no tablet device found (checked /dev/input/event0..63). "
+                          "evdev: no tablet device found (scanned /sys/class/input). "
                           "Grant read access first: udev rule or `usermod -aG input <user>`.");
                     logged_absent = 1;
                 }
@@ -646,6 +752,11 @@ static DWORD WINAPI reader_thread(LPVOID param)
                 lx_sleep_ms(recheck);
                 continue;
             }
+            if (wtm_on()) {
+                g_batch_us = wtm_now_us();
+                refresh_rt_offset();
+            }
+            g_burst++;
             have += (size_t)n;
             while (have - off >= sizeof(lx_input_event)) {
                 lx_input_event ev;
@@ -689,8 +800,10 @@ int evdev_start(void)
     g_invert_y = env_int("WT_INVERT_Y", 0);
     g_swap_xy  = env_int("WT_SWAP_XY", 0);
     g_pos_cursor = env_int("WT_POS_CURSOR", 1);
-    wtlog(WTLOG_INIT, "evdev: position from %s (WT_POS_CURSOR), pointer sync %s (WT_MOUSE_SYNC, %d ms)",
+    g_pos_cache = env_int("WT_POS_CACHE", 0);
+    wtlog(WTLOG_INIT, "evdev: position from %s (WT_POS_CURSOR), cache %s (WT_POS_CACHE), pointer sync %s (WT_MOUSE_SYNC, %d ms)",
           g_pos_cursor ? "the system pointer" : "the tablet's absolute axes",
+          g_pos_cache ? "on" : "off",
           env_int("WT_MOUSE_SYNC", 0) ? "on" : "off", env_int("WT_MOUSE_SYNC_MS", 12));
 
     /* Ranges: the Intuos defaults, overridable by environment.  Parsed before

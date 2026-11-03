@@ -14,7 +14,7 @@ y el cursor se mueven juntos, sólo llegan un poco tarde.
 Evidencia: tabla real con 962 paquetes y 64 presiones distintas (0–1023),
 `WTGetW pktData=0x1fe4` —exactamente la máscara de Qt—, `WTQueueSizeGet = 128`,
 un único `WTOpenW` por corrida, y el trazo con presión confirmado por el usuario
-en pantalla. Detalle: el resto de este documento.
+en pantalla. Detalle: `docs/harmony25-lapiz-presion.md`.
 
 > **Hallazgo que cambió el diseño:** Qt 6.4.2 **no usa WinTab** salvo que se
 > desactive WM_POINTER, y Wine **borra** las variables `QT_*` del entorno. Las
@@ -226,7 +226,8 @@ sudo apt install mingw-w64        # Debian/Ubuntu dentro del contenedor
 ## 7. Instalar / desinstalar
 
 ```bash
-./instalar.sh                     # o ./instalar.sh /ruta/al/prefix
+./instalar.sh --todo              # todo, incluida la regla udev (pide sudo una vez)
+./instalar.sh                     # sin udev: DLL + override + qt.conf
 ./desinstalar.sh
 ```
 
@@ -244,7 +245,44 @@ sudo apt install mingw-w64        # Debian/Ubuntu dentro del contenedor
    `~/.local/bin/harmony25`, la línea `Exec=` del `.desktop` y una búsqueda
    acotada. Se le puede pasar el directorio como 2º argumento. Deja copia en
    `qt.conf.antes-shim` si ya existía;
-4. avisa si falta el grupo `input` o si el nodo no es legible.
+4. al terminar corre **`verificar.sh`** (autodiagnóstico, sólo lectura) y
+   avisa si falta el grupo `input` o si el nodo no es legible.
+
+### `verificar.sh` — autodiagnóstico
+
+```bash
+./verificar.sh            # o ./verificar.sh /ruta/al/prefix
+```
+
+No instala nada: comprueba las cinco cosas que han fallado de verdad en este
+proyecto y, cuando algo falla, imprime el comando exacto que lo arregla.
+
+| comprobación | incidente real que cubre |
+|---|---|
+| la DLL de `system32` es el shim (busca el export ASCII `WTShimInfo`) | se instaló el builtin, o quedó una DLL vieja |
+| `wintab32=native` en `user.reg` | override perdido al recrear el prefix |
+| `qt.conf` con `nowmpointer` junto al `.exe` | Qt 6.4.2 prefiere WM_POINTER y no carga wintab32 |
+| el nodo del lápiz se deja abrir | permiso caído (ACL, grupo `input`, regla udev) |
+| el `wt.log` del último arranque dice `evdev: using …` | número de nodo cambiado, o la app no abrió contexto |
+
+Salida de ejemplo en una máquina sana:
+
+```
+1) DLL instalada
+  ok     es el shim (369226 bytes)
+  ok     coincide con dist/ (369226 bytes)
+2) override nativo en el registro
+  ok     wintab32=native
+3) qt.conf junto al .exe
+  ok     …/win64/bin/qt.conf tiene windows:nowmpointer
+4) nodo del lápiz en /dev/input
+  ok     /dev/input/event21 legible ("Wacom Intuos PT S 2 Pen")
+5) último arranque de Harmony
+  ok     evdev: using /dev/input/event21 … pressure=0..2047 -> 0..1023
+```
+
+Sólo informa: nunca escribe en el prefix ni en `/dev`. Sale con 0 si todo está
+bien y 1 si hay algún FALLA.
 
 Equivalente manual: `WINEDLLOVERRIDES="wintab32=n"` al lanzar (o `winecfg` →
 Libraries → `wintab32` → *Native*) **más** `qt.conf`, o `-platform
@@ -257,10 +295,10 @@ El nodo es `root:input 0660`; sin acceso el shim no lee nada (lo dice en el log:
 
 ```bash
 # A) grupo (recomendado, sobrevive reinicios)
-sudo usermod -aG input "$USER"       # y volver a iniciar sesión
+sudo usermod -aG input daniel       # y volver a iniciar sesión
 #    (mientras no cierres sesión, el grupo viejo sigue activo: usa la opción C)
 # C) prueba inmediata sin relogin (se pierde al reiniciar)
-sudo setfacl -m "u:$USER:r" /dev/input/eventNN
+sudo setfacl -m "u:daniel:r" /dev/input/event20
 
 # B) regla udev con ACL para el usuario de la sesión
 sudo tee /etc/udev/rules.d/99-wacom-uaccess.rules >/dev/null <<'EOF'
@@ -337,7 +375,10 @@ suficiente y el nombre del nodo del lápiz siempre está disponible.
 
 ### 9.2 Detección del nodo (v3: por nombre en sysfs)
 
-1. Lee `/sys/class/input/event0..63/device/name` con `CreateFileA`+`ReadFile`.
+1. Lista `/sys/class/input` con `FindFirstFileA("Z:\\sys\\class\\input\\event*")` — los
+   números de nodo cambian al reiniciar (en este host el lápiz pasó de `event20` a
+   `event260`, y un barrido fijo 0..63 no lo veía). Después lee
+   `<nodo>/device/name` con `CreateFileA`+`ReadFile`.
 2. Puntúa: `wacom`/`intuos` +100, `pen`/`stylus`/`tablet` +50, y resta por
    `pad`/`touch`/`keyboard`/`mouse`/`consumer`/`control` (-200). El nodo del
    lápiz de la Intuos PT S 2 queda con **score 150**; el `… Pad` y el `… Finger`
@@ -443,7 +484,7 @@ La forma estable es una regla udev con `uaccess`, que systemd-logind traduce a u
 ACL del usuario de la sesión (y lo re-aplica solo):
 
 ```bash
-cd wintab32
+cd /var/home/daniel/dsh-sandbox/workspace/tb/wintab
 sudo ./instalar.sh --udev          # /etc/udev/rules.d/70-wacom-wintab.rules
 getfacl -p /dev/input/event20 | grep "$USER"
 ```
@@ -457,13 +498,26 @@ El número importa: el builtin `uaccess` de systemd-logind se encola en
 De ahí `70-wacom-wintab.rules`; `MODE="0664"` queda como red de seguridad por si
 el seat no está disponible (el nodo de un lápiz no es un teclado).
 
-Alternativa: `sudo usermod -aG input "$USER"` + cerrar y abrir sesión (el grupo no
+Alternativa: `sudo usermod -aG input daniel` + cerrar y abrir sesión (el grupo no
 entra en el proceso actual). Para revertir la regla: `sudo ./desinstalar.sh --udev`.
+
+### 9.7 Lo que cuesta el shim (`docs/LATENCIA.md`)
+
+El medidor (`WT_METRICS`) escribe un CSV al cerrar la app con `t_ev`, `t_read`,
+`t_post` por paquete, la cola y los descartes. Medido en el banco: 8 µs por
+paquete de coste propio, pero 207 µs con `WT_POS_CURSOR=1`, porque
+`GetCursorPos()` es un round-trip a X y se hace uno por paquete. `WT_POS_CACHE=1`
+lo hace una vez por ráfaga (mismas coordenadas) y devuelve el coste a 8 µs.
+
+El agrupado (`WT_COALESCE=1`) baja de 173 a 24 mensajes/s pero el último tramo de
+una ráfaga espera al evento siguiente (hasta 244 ms en el banco), y como la cola
+nunca pasó de 43/128 con 0 descartes, no compensa: queda apagado. Detalle,
+comandos y límites en `docs/LATENCIA.md`.
 
 ## 10. Verificación en el host (el paso que falta)
 
 ```bash
-cd wintab32
+cd /var/home/daniel/dsh-sandbox/workspace/tb/wintab
 ./instalar.sh                     # DLL + override + qt.conf
 ./probar_shim.sh 10               # shim contra el lápiz, sin Harmony
 ```
@@ -540,7 +594,12 @@ eventos. En el log, `evdev: position from …` dice cuál está activo y
 | `WT_MOUSE_BLOCK` | 1 | descarta los mensajes de mouse con el lápiz en proximidad (9.5) |
 | `WT_MOUSE_SYNC` | 0 | mueve el puntero a la posición absoluta del lápiz (v3; sólo si el cursor deriva) |
 | `WT_MOUSE_SYNC_MS` | 12 | throttle de los warps |
+| `WT_POS_CACHE` | 0 | consulta el puntero una vez por ráfaga en vez de por paquete: mismas coordenadas, 207 µs -> 8 µs por paquete; **recomendado 1** (ver `docs/LATENCIA.md`) |
 | `WT_RECHECK_MS` | reintento de autodetección (1000) |
+| `WT_METRICS` | ruta del CSV del medidor (apagado si falta); `/tmp/x` -> `Z:\tmp\x` |
+| `WT_METRICS_LEVEL` | 1 resumen, 2 una fila por paquete |
+| `WT_COALESCE` | 0 | agrupa varios paquetes en un `WT_PACKET`; reduce mensajes 7× pero añade cola de espera, y la cola nunca se llenó: se queda apagado |
+| `WT_COALESCE_MS` | 4 | ventana del agrupado |
 
 ## 12. Limitaciones
 

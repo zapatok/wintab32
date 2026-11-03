@@ -15,24 +15,33 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RULE=/etc/udev/rules.d/70-wacom-wintab.rules
+RULE_DIR="${WT_UDEV_DIR:-/etc/udev/rules.d}"
+RULE="$RULE_DIR/70-wacom-wintab.rules"
 
 if [ "${1:-}" = "--udev" ]; then
     [ "$(id -u)" = 0 ] || { echo "ERROR: la regla udev necesita root:  sudo $0 --udev"; exit 1; }
-    rm -f /etc/udev/rules.d/99-wacom-wintab.rules   # versión anterior, orden equivocado
+    rm -f "$RULE_DIR/99-wacom-wintab.rules"   # versión anterior, orden equivocado
     cat > "$RULE" <<'RULE_EOF'
 # wintab32 shim (Harmony 25 bajo Wine): permite al usuario de la sesión
 # leer el nodo del lápiz.  "uaccess" lo gestiona systemd-logind, así que
 # sobrevive a reconexiones de la tableta y a reinicios.
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Wacom*", TAG+="uaccess", MODE="0664"
 RULE_EOF
-    udevadm control --reload-rules
-    udevadm trigger --subsystem-match=input
-    sleep 1
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules
+        udevadm trigger --subsystem-match=input
+        sleep 1
+    else
+        echo "!! sin udevadm: la regla se aplicará al reconectar la tableta o al reiniciar"
+    fi
     echo "== regla instalada: $RULE"
-    echo "   comprueba con:  getfacl -p /dev/input/event20 | grep daniel"
+    echo "   comprueba con:  getfacl -p /dev/input/event20"
     exit 0
 fi
+
+# --todo: instala todo, incluida la regla udev (pide sudo una vez) y se acabó.
+CON_UDEV=0
+[ "${1:-}" = "--todo" ] && { CON_UDEV=1; shift; }
 
 PREFIX="${1:-${WINEPREFIX:-$HOME/.local/share/wineprefixes/harmony25}}"
 SYS32="$PREFIX/drive_c/windows/system32"
@@ -45,7 +54,14 @@ echo "== prefix: $PREFIX"
 [ -d "$SYS32" ] || { echo "ERROR: no existe $SYS32 (¿prefix equivocado?)"; exit 1; }
 
 # ---------------------------------------------------------------- 1. la DLL
-if [ -f "$DST" ] && ! grep -qa "ToonBoom Linux WinTab" "$DST"; then
+# Our DLL exports WTShimInfo, and PE export names are stored as ASCII; the
+# WTInfo id string is UTF-16LE, where a plain grep does not find it.
+is_ours() {
+    grep -qa 'WTShimInfo' "$1" 2>/dev/null && return 0
+    command -v grep >/dev/null && grep -qaP 'T\x00o\x00o\x00n\x00B\x00' "$1" 2>/dev/null
+}
+
+if [ -f "$DST" ] && ! is_ours "$DST"; then
     [ -f "$BACKUP" ] || { cp -p "$DST" "$BACKUP"; echo "== respaldo del builtin: $BACKUP"; }
 fi
 install -m 0644 "$SRC" "$DST"
@@ -132,37 +148,37 @@ fi
 
 # --------------------------------------------------------- 4. /dev/input
 echo
-if id -nG "${USER:-$(id -un)}" | tr ' ' '\n' | grep -qx input; then
-    echo "== grupo input: OK"
-else
-    echo "!! ${USER:-$(id -un)} NO está en el grupo input; sin eso el shim no lee la tableta:"
-    echo "     sudo usermod -aG input ${USER:-$(id -un)}    # y reiniciar sesión"
-fi
 NODE=""
 for n in /sys/class/input/event*/device/name; do
     case "$(cat "$n" 2>/dev/null)" in
         *[Ww]acom*Pen*) NODE="/dev/input/$(basename "$(dirname "$(dirname "$n")")")"; break;;
     esac
 done
-if [ -n "$NODE" ]; then
-    if [ -r "$NODE" ]; then
-        echo "== tableta: $NODE legible"
-    else
-        echo "!! $NODE existe pero no es legible AHORA."
-        echo "   Opción permanente (sobrevive a reconexiones y reinicios):"
-        echo "     sudo $0 --udev"
-        echo "   Opción de grupo (requiere cerrar y abrir sesión):"
-        echo "     sudo usermod -aG input ${USER:-$(id -un)}"
-        echo "   Parche temporal para probar ya (se pierde al reconectar la tableta):"
-        echo "     sudo setfacl -m \"u:${USER:-$(id -un)}:r\" $NODE"
-    fi
-else
+if [ -z "$NODE" ]; then
     echo "== no detecté nodo de lápiz Wacom ahora; el shim autodetecta al arrancar"
+elif [ -r "$NODE" ]; then
+    echo "== tableta: $NODE legible"
+elif [ ! -e "$NODE" ]; then
+    echo "!! $NODE no existe aquí (¿contenedor?); en el host debería existir."
+elif [ -f "$RULE" ]; then
+    echo "!! $NODE existe pero no es legible todavía."
+    echo "   La regla udev está puesta; el ACL lo aplica logind al conectar."
+    echo "   Reconecta la tableta o reinicia la sesión, y comprueba:  getfacl -p $NODE"
+else
+    echo "!! $NODE existe pero no es legible."
+    echo "   Lo directo (una regla udev, sobrevive a todo):   sudo $0 --udev"
+    echo "   Alternativa por grupo (cerrar y abrir sesión):   sudo usermod -aG input ${USER:-$(id -un)}"
+    echo "   Sólo para probar ya (se pierde al reconectar):   sudo setfacl -m \"u:${USER:-$(id -un)}:r\" $NODE"
 fi
 
 cat <<'EOF'
 
-== listo.
+== instalado. Ahora el autodiagnóstico:
+EOF
+[ -x "$HERE/verificar.sh" ] && { echo; "$HERE/verificar.sh" "$PREFIX" || true; }
+cat <<'EOF'
+
+== siguientes pasos
    1) ./probar_shim.sh 10     # prueba el shim con el lápiz real
    2) abrir Harmony y dibujar
    3) revisar el log:  $PREFIX/drive_c/wt.log   (WT_LOG_LEVEL=3 = cada paquete)
