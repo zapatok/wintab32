@@ -153,7 +153,6 @@ sudo usermod -aG input "$USER"      # then log out and back in
 Or a udev rule with `TAG+="uaccess"`.
 
 ## License
-
 MIT. See [LICENSE](LICENSE).
 
 WinTab is a specification by LCS/Telegraphics; `ref/` contains upstream files
