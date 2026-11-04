@@ -69,12 +69,17 @@ Requires `mingw-w64` (x86_64) and `make`-free simplicity:
 
 ## Install
 
+> **The device permission is not optional.** `/dev/input/eventN` is root-only by
+> default. Without the udev rule (or membership of the `input` group) the shim
+> loads, WinTab answers, and **pressure stays at zero** — with no error anywhere.
+> This is the single most common way to think the shim is broken when it is not.
+
 ```bash
 ./instalar.sh --todo  # DLL + override + qt.conf + the udev rule (asks sudo once)
 ```
 
-Without `--todo` the udev rule is left out, and the pen may be unreadable
-(`/dev/input` is root-only by default). Then, at any moment:
+Without `--todo` the udev rule is left out and the pen is unreadable. Then, at
+any moment:
 
 ```bash
 ./verificar.sh        # read-only: says which of the five pieces is missing
